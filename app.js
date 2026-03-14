@@ -1,3 +1,4 @@
+// Test restart trigger - timestamp: $(date)
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -5,6 +6,7 @@ const morgan = require('morgan');
 const errorMiddleware = require('./middleware/errorMiddleware');
 const authMiddleware = require('./middleware/authMiddleware');
 const rateLimiter = require('./middleware/rateLimiter');
+const fingerprintMiddleware = require('./tracking/middleware/fingerprintMiddleware');
 
 const app = express();
 
@@ -40,6 +42,11 @@ app.use((req, res, next) => {
 });
 
 app.use(morgan('dev'));
+
+// ── Centralized request fingerprinting ────────────────────────────────────────
+// Attaches req.context to every request with normalized IP, UA, device, and
+// geo stub fields. Must run AFTER body parsing and BEFORE route handlers.
+app.use(fingerprintMiddleware);
 
 // Apply rate limiter to tracking endpoints
 app.use('/api/track', rateLimiter);
