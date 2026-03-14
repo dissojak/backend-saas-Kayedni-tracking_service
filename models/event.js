@@ -1,25 +1,36 @@
 const mongoose = require('mongoose');
 
+/**
+ * Event schema — lightweight behavioural events.
+ *
+ * Events are intentionally lean: they store the minimum needed for analytics.
+ * Device metadata is flattened (no nested sub-documents) for efficient index usage.
+ * All context fields are injected by the server via req.context from
+ * fingerprintMiddleware — never duplicated from the client payload.
+ */
 const eventSchema = new mongoose.Schema(
   {
+    // ── Identity ─────────────────────────────────────────────────────────────
     userId: {
       type: String,
       default: null,
       index: true,
-      description: 'Numeric user ID from Spring Boot backend (null for anonymous users)',
+      description: 'Authenticated user ID (null for anonymous)',
     },
     anonymousId: {
       type: String,
       default: null,
       index: true,
-      description: 'UUID for tracking anonymous users',
+      description: 'Persistent anonymous UUID from the client SDK',
     },
     sessionId: {
       type: String,
       required: true,
       index: true,
-      description: 'Unique session identifier',
+      description: 'Parent session identifier',
     },
+
+    // ── Event payload ──────────────────────────────────────────────────────────
     eventType: {
       type: String,
       required: true,
@@ -64,15 +75,59 @@ const eventSchema = new mongoose.Schema(
     },
     page: {
       type: String,
-      description: 'Page path or route (e.g., /search, /business/123)',
+      default: '',
+      description: 'Page path or route e.g. /search, /business/123',
     },
     properties: {
       type: mongoose.Schema.Types.Mixed,
       default: {},
-      description: 'Custom properties specific to event type',
+      description: 'Custom properties specific to the event type',
     },
-    userAgent: String,
-    ipAddress: String,
+
+    // ── Device metadata (server-injected via fingerprintMiddleware) ────────────
+    ipAddress: {
+      type: String,
+      default: 'unknown',
+      description: 'Real client IP (proxy-aware)',
+    },
+    userAgent: {
+      type: String,
+      default: '',
+      description: 'Raw User-Agent header (for forensics / replay)',
+    },
+    browser: {
+      type: String,
+      default: 'Unknown',
+    },
+    browserVersion: {
+      type: String,
+      default: '',
+    },
+    os: {
+      type: String,
+      default: 'Unknown',
+    },
+    osVersion: {
+      type: String,
+      default: '',
+    },
+    deviceType: {
+      type: String,
+      enum: ['desktop', 'mobile', 'tablet', 'bot'],
+      default: 'desktop',
+    },
+
+    // ── Geo (populated by GeoIP service) ─────────────────────────────────────
+    country: {
+      type: String,
+      default: '',
+    },
+    city: {
+      type: String,
+      default: '',
+    },
+
+    // ── Timing ───────────────────────────────────────────────────────────────
     timestamp: {
       type: Date,
       default: Date.now,
@@ -82,9 +137,26 @@ const eventSchema = new mongoose.Schema(
   { timestamps: true, collection: 'events' }
 );
 
-// Index for querying by userId and timestamp range
+// ── Indexes ──────────────────────────────────────────────────────────────────
+
+// Core analytics queries
+eventSchema.index({ sessionId: 1, timestamp: -1 });
 eventSchema.index({ userId: 1, timestamp: -1 });
-// Index for anonymous tracking
 eventSchema.index({ anonymousId: 1, timestamp: -1 });
+eventSchema.index({ eventType: 1, timestamp: -1 });
+
+// Funnel analysis (e.g. booking conversion by device)
+eventSchema.index({ eventType: 1, deviceType: 1, timestamp: -1 });
+
+// Page-level analytics
+eventSchema.index({ page: 1, timestamp: -1 });
+
+// Geo / country analytics
+eventSchema.index({ country: 1, eventType: 1, timestamp: -1 });
+
+// ── TTL: auto-delete raw events older than 1 year ─────────────────────────────
+// Aggregated profiles in userBehaviorProfiles preserve the summaries.
+// Uncomment once your data-retention policy is confirmed:
+// eventSchema.index({ timestamp: 1 }, { expireAfterSeconds: 60 * 60 * 24 * 365 });
 
 module.exports = mongoose.model('Event', eventSchema);

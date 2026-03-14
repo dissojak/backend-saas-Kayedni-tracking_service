@@ -1,19 +1,25 @@
 const mongoose = require('mongoose');
 
 /**
- * AuthLog — dedicated collection for all auth-related events.
- * Separate from the generic events collection so security queries are fast
- * and isolated from analytics data.
+ * AuthLog schema — dedicated collection for all auth-related events.
  *
- * Used for:
- *  - Login funnel analysis (attempt → success / failure + reason)
- *  - Brute-force / credential-stuffing detection (IP + email indices)
- *  - Registration and password-reset forensics
- *  - IP reputation tracking
+ * Security philosophy:
+ *  - Completely separate from the generic events collection so security queries
+ *    run on a dedicated, smaller dataset with tight indexes.
+ *  - Stores enough information to detect brute-force and credential-stuffing
+ *    attacks without scanning the full events collection.
+ *  - All network/device fields are injected server-side from fingerprintMiddleware.
+ *    The old `ip` field has been renamed to `ipAddress` for consistency across
+ *    every collection in this service (sessions, events, auth_logs).
+ *
+ * Security signals:
+ *  - riskScore     : computed 0–100 severity score (set by authLogService)
+ *  - isSuspicious  : flag set when threshold-based rules fire
+ *  - attemptNumber : consecutive attempt count for this email+IP combination
  */
 const authLogSchema = new mongoose.Schema(
   {
-    // What happened
+    // ── What happened ────────────────────────────────────────────────────────
     action: {
       type: String,
       required: true,
@@ -34,32 +40,31 @@ const authLogSchema = new mongoose.Schema(
       index: true,
     },
 
-    // Auth result — null for attempt events (outcome not yet known when the log fires)
+    // Auth outcome — null for attempt events (outcome unknown at log time)
     success: {
       type: Boolean,
       default: null,
       index: true,
     },
 
-    // Failure reason (null on success)
+    // Failure details
     failReason: {
       type: String,
       default: null,
     },
-
-    // The stage where it failed: 'validation' | 'api' | 'network_error'
     failStage: {
       type: String,
+      enum: ['validation', 'api', 'network_error', null],
       default: null,
     },
 
-    // User identity
+    // ── User identity ─────────────────────────────────────────────────────────
     email: {
       type: String,
       default: null,
       index: true,
     },
-    // Store only the domain for privacy-safe aggregate queries (e.g. gmail.com attacks)
+    // Domain stored separately for privacy-safe aggregate queries (e.g. gmail.com attack trends)
     emailDomain: {
       type: String,
       default: null,
@@ -69,15 +74,20 @@ const authLogSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
-    // Resolved userId after successful login (null for anonymous/failed attempts)
     userId: {
       type: String,
       default: null,
       index: true,
     },
+    sessionId: {
+      type: String,
+      default: null,
+      index: true,
+    },
 
-    // Network & device fingerprint — critical for hacker detection
-    ip: {
+    // ── Network / device fingerprint (server-side, from fingerprintMiddleware) ──
+    // Field is `ipAddress` — consistent with sessions and events collections.
+    ipAddress: {
       type: String,
       required: true,
       index: true,
@@ -86,8 +96,11 @@ const authLogSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
-    // Parsed UA breakdown
     browser: {
+      type: String,
+      default: null,
+    },
+    browserVersion: {
       type: String,
       default: null,
     },
@@ -95,19 +108,57 @@ const authLogSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
+    osVersion: {
+      type: String,
+      default: null,
+    },
     deviceType: {
       type: String,
+      enum: ['desktop', 'mobile', 'tablet', 'bot', null],
       default: null,
     },
 
-    // Correlation with analytics session
-    sessionId: {
+    // ── Geo (populated by GeoIP service) ──────────────────────────────────────
+    country: {
       type: String,
       default: null,
-      index: true,
+    },
+    city: {
+      type: String,
+      default: null,
     },
 
-    // Any extra context (field name for validation errors, etc.)
+    // ── Security scoring ──────────────────────────────────────────────────────
+    /**
+     * 0–100 risk score computed at write time by authLogService.computeRiskScore().
+     * Factors: consecutive failures, known bot UA, unusual country, etc.
+     */
+    riskScore: {
+      type: Number,
+      default: 0,
+      min: 0,
+      max: 100,
+    },
+    /**
+     * Quick boolean flag — set to true when security rules trigger.
+     * Makes dashboard queries trivially cheap with a covering index.
+     */
+    isSuspicious: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+    /**
+     * Consecutive failed attempts for this email+IP pair at write time.
+     * Lets the frontend / alerting system know how severe the situation is
+     * without running a separate COUNT query.
+     */
+    attemptNumber: {
+      type: Number,
+      default: 1,
+    },
+
+    // ── Extra context ─────────────────────────────────────────────────────────
     metadata: {
       type: mongoose.Schema.Types.Mixed,
       default: {},
@@ -122,18 +173,28 @@ const authLogSchema = new mongoose.Schema(
   { timestamps: true, collection: 'auth_logs' }
 );
 
-// ── Compound indices for brute-force / security queries ─────────────────────
+// ── Compound indexes for brute-force / security queries ──────────────────────
 
-// Failed logins from the same IP in a time window → brute force by IP
-authLogSchema.index({ ip: 1, success: 1, timestamp: -1 });
+// Core security: failed logins from same IP in a time window → brute force
+authLogSchema.index({ ipAddress: 1, success: 1, timestamp: -1 });
 
-// Failed logins against the same email in a time window → credential stuffing
+// Credential stuffing: same email attacked from many IPs
 authLogSchema.index({ email: 1, success: 1, timestamp: -1 });
 
-// Failed logins per action+IP (e.g. how many login_failed from X IP)
-authLogSchema.index({ action: 1, ip: 1, timestamp: -1 });
+// Action breakdown by IP
+authLogSchema.index({ action: 1, ipAddress: 1, timestamp: -1 });
 
 // Admin dashboard: all recent failures sorted by time
 authLogSchema.index({ success: 1, timestamp: -1 });
+
+// Suspicious event queue
+authLogSchema.index({ isSuspicious: 1, timestamp: -1 });
+
+// High-risk triage
+authLogSchema.index({ riskScore: -1, timestamp: -1 });
+
+// ── TTL: auto-delete auth logs older than 1 year ─────────────────────────────
+// Uncomment once your data-retention policy is confirmed:
+// authLogSchema.index({ timestamp: 1 }, { expireAfterSeconds: 60 * 60 * 24 * 365 });
 
 module.exports = mongoose.model('AuthLog', authLogSchema);
