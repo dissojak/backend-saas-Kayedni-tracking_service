@@ -1,132 +1,162 @@
+/**
+ * sessionService.js
+ *
+ * Manages the full session lifecycle:
+ *  startSession()          — open a new session, populated from req.context
+ *  endSession()            — close the session, compute duration + final eventCount
+ *  updateLastActivity()    — lightweight touch on lastActivityAt (used by session-cleanup job)
+ *  getSessionById()        — fetch by sessionId
+ *  getSessionsByUser()     — list sessions for a user or anonymous visitor
+ *
+ * All device / network metadata comes from req.context (fingerprintMiddleware).
+ * Controllers must pass ctx explicitly — no raw req.ip / req.headers access here.
+ */
+
 const Session = require('../models/session');
 const trackingService = require('./trackingService');
 const logger = require('../utils/logger');
 const HttpError = require('../utils/httpError');
 const { v4: uuidv4 } = require('uuid');
 
-/**
- * Start a new session
- * @param {Object} sessionData - Session data {userId, anonymousId, browser, os, deviceType, ipAddress, referrer}
- * @returns {Promise<Object>} - Saved session document
- */
-exports.startSession = async (sessionData) => {
-  try {
-    const sessionId = sessionData.sessionId || uuidv4();
-    const session = new Session({
-      sessionId,
-      userId: sessionData.userId || null,
-      anonymousId: sessionData.anonymousId || null,
-      browser: sessionData.browser || 'unknown',
-      os: sessionData.os || 'unknown',
-      deviceType: sessionData.deviceType || 'desktop',
-      ipAddress: sessionData.ipAddress,
-      referrer: sessionData.referrer,
-      isActive: true,
-    });
+// ── Lifecycle ──────────────────────────────────────────────────────────────────
 
-    await session.save();
-    const identifier = sessionData.userId || sessionData.anonymousId;
-    logger.info(`Session started: ${sessionId} for ${identifier}`);
-    return session;
-  } catch (err) {
-    logger.error('Error starting session:', err);
-    throw err;
-  }
+/**
+ * Open a new session.
+ *
+ * @param {Object} ctx         req.context (from fingerprintMiddleware)
+ * @param {Object} sessionData { sessionId?, userId?, anonymousId?, entryPage? }
+ * @returns {Promise<import('../models/session')>}
+ */
+exports.startSession = async (ctx, sessionData = {}) => {
+  const sessionId = sessionData.sessionId || uuidv4();
+
+  const session = new Session({
+    sessionId,
+    userId: sessionData.userId || null,
+    anonymousId: sessionData.anonymousId || null,
+
+    startTime: ctx.timestamp || new Date(),
+    lastActivityAt: ctx.timestamp || new Date(),
+
+    // Device metadata from centralized fingerprint — authoritative
+    browser: ctx.browser || 'Unknown',
+    browserVersion: ctx.browserVersion || '',
+    os: ctx.os || 'Unknown',
+    osVersion: ctx.osVersion || '',
+    deviceType: ctx.deviceType || 'desktop',
+    deviceVendor: ctx.deviceVendor || '',
+    deviceModel: ctx.deviceModel || '',
+    userAgent: ctx.userAgent || '',
+
+    // Network
+    ipAddress: ctx.ipAddress || 'unknown',
+
+    // Geo
+    country: ctx.country || '',
+    city: ctx.city || '',
+    timezone: ctx.timezone || '',
+
+    // Context
+    referrer: ctx.referrer || '',
+    entryPage: sessionData.entryPage || '',
+    language: ctx.language || '',
+
+    isActive: true,
+  });
+
+  await session.save();
+
+  const identifier = sessionData.userId || sessionData.anonymousId || 'anon';
+  logger.info(`[session] started=${sessionId} | user=${identifier} | device=${ctx.deviceType} | ip=${ctx.ipAddress}`);
+  return session;
 };
 
 /**
- * End a session
- * @param {String} sessionId - Session ID
- * @returns {Promise<Object>} - Updated session document
+ * Close an active session: compute duration, record final event count.
+ * Idempotent — calling endSession on an already-ended or non-existent session is a no-op.
+ *
+ * This is important because the frontend uses navigator.sendBeacon() which has no
+ * error handling. We gracefully handle stale session IDs (e.g., after session cleanup).
+ *
+ * @param {string} sessionId
+ * @returns {Promise<import('../models/session')|null>}
  */
 exports.endSession = async (sessionId) => {
-  try {
-    const session = await Session.findOne({ sessionId });
-    if (!session) {
-      throw new HttpError(`Session ${sessionId} not found`, 404);
-    }
-
-    // Idempotent: if session is already ended, return it as-is (no error)
-    // This prevents 400 errors from duplicate end requests (sendBeacon + cleanup)
-    if (!session.isActive) {
-      logger.info(`Session ${sessionId} already ended — returning existing data`);
-      return session;
-    }
-
-    const endTime = new Date();
-    const duration = endTime - session.startTime; // milliseconds
-
-    // Get event count for this session
-    const events = await trackingService.getEventsBySession(sessionId);
-    const eventCount = events.length;
-
-    session.endTime = endTime;
-    session.duration = duration;
-    session.eventCount = eventCount;
-    session.isActive = false;
-
-    await session.save();
-    logger.info(`Session ended: ${sessionId}, duration: ${duration}ms, events: ${eventCount}`);
-    return session;
-  } catch (err) {
-    logger.error('Error ending session:', err);
-    throw err;
+  const session = await Session.findOne({ sessionId });
+  if (!session) {
+    logger.warn(`[session] endSession called on non-existent session=${sessionId} — likely cleaned up or stale`);
+    return null; // Graceful: don't error on stale session IDs (sendBeacon compatibility)
   }
+
+  // Idempotent: already ended sessions are returned as-is
+  if (!session.isActive) {
+    logger.info(`[session] ${sessionId} already ended — no-op`);
+    return session;
+  }
+
+  const endTime = new Date();
+  const duration = endTime - session.startTime;
+
+  // Count events for this session from the events collection
+  const eventCount = await require('../models/event').countDocuments({ sessionId });
+
+  session.endTime = endTime;
+  session.duration = duration;
+  session.eventCount = eventCount;
+  session.isActive = false;
+  await session.save();
+
+  logger.info(`[session] ended=${sessionId} | duration=${duration}ms | events=${eventCount}`);
+  return session;
 };
 
 /**
- * Get session by ID
- * @param {String} sessionId - Session ID
- * @returns {Promise<Object>} - Session document
+ * Touch lastActivityAt — used by the session-cleanup job and trackingService
+ * when a standalone activity signal arrives without a new event.
+ *
+ * @param {string} sessionId
+ * @param {Date}   [at]
+ */
+exports.updateLastActivity = async (sessionId, at) => {
+  await Session.findOneAndUpdate(
+    { sessionId, isActive: true },
+    { $set: { lastActivityAt: at || new Date() } }
+  );
+};
+
+// ── Queries ────────────────────────────────────────────────────────────────────
+
+/**
+ * Fetch a single session document by its sessionId.
  */
 exports.getSessionById = async (sessionId) => {
-  try {
-    const session = await Session.findOne({ sessionId });
-    return session;
-  } catch (err) {
-    logger.error('Error fetching session:', err);
-    throw err;
-  }
+  return Session.findOne({ sessionId });
 };
 
 /**
- * Get all sessions for a user or anonymous user
- * @param {String} userId - User ID (can be null for anonymous)
- * @param {String} anonymousId - Anonymous ID
- * @param {Boolean} activeOnly - Only return active sessions
- * @returns {Promise<Array>} - Array of sessions
+ * List sessions for either an authenticated user or an anonymous visitor.
+ *
+ * @param {string|null}  userId
+ * @param {string|null}  anonymousId
+ * @param {boolean}      activeOnly
  */
 exports.getSessionsByUser = async (userId = null, anonymousId = null, activeOnly = false) => {
-  try {
-    const query = {};
-    if (userId) query.userId = userId;
-    if (anonymousId) query.anonymousId = anonymousId;
-    if (activeOnly) query.isActive = true;
-
-    const sessions = await Session.find(query).sort({ startTime: -1 });
-    return sessions;
-  } catch (err) {
-    logger.error('Error fetching sessions:', err);
-    throw err;
-  }
+  const query = {};
+  if (userId) query.userId = userId;
+  if (anonymousId) query.anonymousId = anonymousId;
+  if (activeOnly) query.isActive = true;
+  return Session.find(query).sort({ startTime: -1 });
 };
 
+// ── Legacy alias ───────────────────────────────────────────────────────────────
+
 /**
- * Update session event count
- * @param {String} sessionId - Session ID
- * @param {Number} count - Event count
- * @returns {Promise<Object>} - Updated session
+ * @deprecated Use updateLastActivity() instead.
  */
 exports.updateEventCount = async (sessionId, count) => {
-  try {
-    const session = await Session.findOneAndUpdate(
-      { sessionId },
-      { eventCount: count },
-      { new: true }
-    );
-    return session;
-  } catch (err) {
-    logger.error('Error updating event count:', err);
-    throw err;
-  }
+  return Session.findOneAndUpdate(
+    { sessionId },
+    { eventCount: count },
+    { new: true }
+  );
 };
