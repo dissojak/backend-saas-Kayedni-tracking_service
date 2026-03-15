@@ -9,4 +9,10 @@ requiredVars.forEach((key) => {
   }
 });
 
+const snapshotSyncEnabled = process.env.PROFILE_SNAPSHOT_SYNC_ENABLED === 'true';
+
+if (snapshotSyncEnabled && !process.env.MYSQL_SYNC_DATABASE_URL) {
+  throw new Error('Missing required env var: MYSQL_SYNC_DATABASE_URL');
+}
+
 module.exports = process.env;

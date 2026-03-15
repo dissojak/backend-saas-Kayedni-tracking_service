@@ -1,6 +1,7 @@
 const Event = require('../models/event');
 const Session = require('../models/session');
 const UserBehaviorProfile = require('../models/userBehaviorProfile');
+const profileSnapshotSyncService = require('./profileSnapshotSyncService');
 const logger = require('../utils/logger');
 
 /**
@@ -201,6 +202,24 @@ exports.getTrends = async (days = 7) => {
     };
   } catch (err) {
     logger.error('Error in getTrends:', err);
+    throw err;
+  }
+};
+
+exports.getProfileSnapshotStatus = async () => {
+  try {
+    return await profileSnapshotSyncService.getLatestRunStatus();
+  } catch (err) {
+    logger.error('Error in getProfileSnapshotStatus:', err);
+    throw err;
+  }
+};
+
+exports.triggerProfileSnapshotSync = async () => {
+  try {
+    return await profileSnapshotSyncService.runSync('manual');
+  } catch (err) {
+    logger.error('Error in triggerProfileSnapshotSync:', err);
     throw err;
   }
 };

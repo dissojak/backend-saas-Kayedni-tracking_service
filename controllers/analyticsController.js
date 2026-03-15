@@ -54,6 +54,32 @@ exports.getUserProfile = async (req, res, next) => {
 };
 
 /**
+ * GET /api/analytics/profile-snapshots/status - Latest snapshot sync status
+ */
+exports.getProfileSnapshotStatus = async (req, res, next) => {
+  try {
+    const status = await analyticsService.getProfileSnapshotStatus();
+    res.status(200).json({ success: true, data: status });
+  } catch (err) {
+    logger.error('Error in getProfileSnapshotStatus:', err.message);
+    next(err);
+  }
+};
+
+/**
+ * POST /api/analytics/profile-snapshots/sync - Manually trigger snapshot sync
+ */
+exports.triggerProfileSnapshotSync = async (req, res, next) => {
+  try {
+    const result = await analyticsService.triggerProfileSnapshotSync();
+    res.status(200).json({ success: true, data: result });
+  } catch (err) {
+    logger.error('Error in triggerProfileSnapshotSync:', err.message);
+    next(err);
+  }
+};
+
+/**
  * GET /api/analytics/trends - Time-series trend data
  */
 exports.getTrends = async (req, res, next) => {
