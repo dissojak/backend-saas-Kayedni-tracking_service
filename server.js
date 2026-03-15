@@ -10,6 +10,7 @@ const app = require('./app');
 const connectDB = require('./config/db');
 const logger = require('./utils/logger');
 const { scheduleProfileAggregation } = require('./jobs/profileAggregationJob');
+const { scheduleProfileSnapshotSync } = require('./jobs/profileSnapshotSyncJob');
 const { scheduleSessionCleanup } = require('./jobs/sessionCleanupJob');
 
 const PORT = process.env.PORT || 5000;
@@ -48,6 +49,7 @@ const start = async () => {
 
     // Initialize CRON jobs
     scheduleProfileAggregation();
+    scheduleProfileSnapshotSync();
     scheduleSessionCleanup();
 
     const server = await startServer();

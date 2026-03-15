@@ -14,6 +14,12 @@ router.get('/business/:id', authMiddleware, analyticsController.getBusinessInsig
 // GET /api/analytics/user/:id/profile - user behavior profile
 router.get('/user/:id/profile', authMiddleware, analyticsController.getUserProfile);
 
+// GET /api/analytics/profile-snapshots/status - latest sync status
+router.get('/profile-snapshots/status', authMiddleware, analyticsController.getProfileSnapshotStatus);
+
+// POST /api/analytics/profile-snapshots/sync - manually trigger snapshot sync
+router.post('/profile-snapshots/sync', authMiddleware, analyticsController.triggerProfileSnapshotSync);
+
 // GET /api/analytics/trends - time-series trend data
 router.get('/trends', authMiddleware, analyticsController.getTrends);
 
