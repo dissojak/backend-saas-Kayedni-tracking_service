@@ -118,6 +118,16 @@ Jobs are initialized at startup.
 
 - Missing env var error on startup:
   - Check `.env` for required keys.
+
+## License and Copyright
+
+This repository is proprietary.
+
+Copyright (c) 2026 StoonProduction. All rights reserved.
+
+No right is granted to use, copy, edit, modify, distribute, or create derivative works without prior written permission from StoonProduction.
+
+See `LICENSE` in this repository and `../LICENSE` at workspace root for full terms.
 - CORS issues from frontend:
   - Ensure `CORS_ORIGIN` matches frontend origin.
 - Unauthorized responses:
