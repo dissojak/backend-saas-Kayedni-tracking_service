@@ -40,6 +40,10 @@ const EVENT_TYPES = [
   'click_phone',
   'click_location',
   'favorite_action',
+  'slice_landing_view',
+  'slice_landing_cta_click',
+  'industry_feedback_submitted',
+  'industry_feedback_failed',
 ];
 const BROWSERS = ['Chrome', 'Safari', 'Firefox', 'Edge'];
 const OS_TYPES = ['macOS', 'Windows', 'iOS', 'Android'];
@@ -128,6 +132,15 @@ const generateEvent = (userId, sessionId, sessionStartTime) => {
   } else if (eventType === 'favorite_action') {
     properties.businessId = randomInt(100, 102).toString();
     properties.action = ['add', 'remove'][randomInt(0, 1)];
+  } else if (eventType === 'slice_landing_view') {
+    properties.slice = ['barber', 'salon', 'beauty&hairstyling'][randomInt(0, 2)];
+    properties.source = 'route';
+  } else if (eventType === 'slice_landing_cta_click') {
+    properties.slice = ['barber', 'salon', 'beauty&hairstyling'][randomInt(0, 2)];
+    properties.cta = ['launch', 'browse'][randomInt(0, 1)];
+  } else if (eventType === 'industry_feedback_submitted' || eventType === 'industry_feedback_failed') {
+    properties.source = 'signup';
+    properties.slice = ['generic', 'barber', 'salon', 'beauty&hairstyling'][randomInt(0, 3)];
   }
 
   return {
