@@ -12,8 +12,14 @@ function getPool() {
   }
 
   if (!pool) {
+    const connectionUrl = process.env.MYSQL_SYNC_DATABASE_URL;
+
+    if (!connectionUrl) {
+      throw new Error('Missing required env var: MYSQL_SYNC_DATABASE_URL');
+    }
+
     pool = mysql.createPool({
-      uri: process.env.MYSQL_SYNC_DATABASE_URL,
+      uri: connectionUrl,
       waitForConnections: true,
       connectionLimit: Number(process.env.MYSQL_SYNC_CONNECTION_LIMIT || 5),
       queueLimit: 0,
